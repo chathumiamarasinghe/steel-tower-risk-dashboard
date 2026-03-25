@@ -1,10 +1,13 @@
 import os
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 _df: Optional[pd.DataFrame] = None
+_engine: Optional[Engine] = None
 
 NUMERIC_COLS = {
     "latitude",
@@ -51,43 +54,59 @@ def _load_from_csv(path: str) -> pd.DataFrame:
     return _normalize_dataframe(raw)
 
 
-def _load_from_supabase(url: str) -> pd.DataFrame:
-    """Load towers table created from Colab upload (column tower_id -> id for API)."""
-    engine = create_engine(url, pool_pre_ping=True)
-    try:
-        raw = pd.read_sql(text("SELECT * FROM towers"), con=engine)
-    finally:
-        engine.dispose()
-
-    if raw.empty:
-        raise RuntimeError("towers table is empty")
-
-    if "tower_id" in raw.columns:
-        raw = raw.rename(columns={"tower_id": "id"})
-    elif "id" not in raw.columns:
-        raise RuntimeError("towers table must have tower_id or id column")
-
-    return _normalize_dataframe(raw)
+def uses_database() -> bool:
+    """True when DATABASE_URL is used: queries run in Postgres, no full-table RAM load."""
+    return _engine is not None
 
 
 def load_data() -> None:
     """
-    Prefer Supabase/Postgres when DATABASE_URL is set (deploy).
-    Otherwise load local CSV via DATA_PATH (development).
+    DATABASE_URL set: create a small SQLAlchemy pool only (chunked queries per request).
+    Else: load a CSV from DATA_PATH (optional local dev only; no default filename).
     """
-    global _df
+    global _df, _engine
     db_url = os.getenv("DATABASE_URL", "").strip()
     if db_url:
-        _df = _load_from_supabase(db_url)
-        print(f"Loaded {len(_df)} tower rows from Supabase (towers)")
+        _engine = create_engine(
+            db_url,
+            pool_pre_ping=True,
+            pool_size=2,
+            max_overflow=2,
+            pool_recycle=300,
+        )
+        _df = None
+        with _engine.connect() as conn:
+            n = conn.execute(text("SELECT COUNT(*) FROM towers")).scalar()
+        print(
+            f"Database mode: {int(n):,} towers in `towers` (no full-table load; chunked SQL reads)"
+        )
         return
 
-    path = os.getenv("DATA_PATH", "data/master_final_scored.csv")
+    _engine = None
+    path_raw = os.getenv("DATA_PATH", "").strip()
+    if not path_raw:
+        raise RuntimeError(
+            "No data source configured: set DATABASE_URL (Supabase/Postgres), "
+            "or set DATA_PATH to an existing scored CSV for offline/local use."
+        )
+    path = str(Path(path_raw).expanduser().resolve())
+    if not Path(path).is_file():
+        raise RuntimeError(
+            f"DATA_PATH is not a file: {path}. "
+            "Set DATABASE_URL, or point DATA_PATH at your CSV."
+        )
     _df = _load_from_csv(path)
-    print(f"Loaded {len(_df)} tower rows from CSV: {path}")
+    print(f"CSV mode: loaded {len(_df)} tower rows from {path} (in-memory DataFrame)")
+
+
+def get_engine() -> Engine:
+    if _engine is None:
+        raise RuntimeError("Database engine not initialized; set DATABASE_URL and call load_data()")
+    return _engine
 
 
 def get_df() -> pd.DataFrame:
+    """In-memory towers table (CSV mode only)."""
     if _df is None:
-        raise RuntimeError("Dataframe not loaded; call load_data() first")
+        raise RuntimeError("Dataframe not loaded; call load_data() first (CSV mode)")
     return _df

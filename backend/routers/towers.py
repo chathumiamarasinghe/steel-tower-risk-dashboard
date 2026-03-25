@@ -6,9 +6,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
-from db.database import get_df
+from db import tower_queries as tq
+from db.database import get_df, get_engine, uses_database
 from models.tower import TOWER_PROPERTY_KEYS
 
 router = APIRouter(prefix="/towers", tags=["towers"])
@@ -86,6 +87,8 @@ def _doe_match_str(row: pd.Series, key: str) -> str:
 
 @router.get("/stats")
 def get_stats() -> dict[str, Any]:
+    if uses_database():
+        return tq.fetch_stats_sql(get_engine())
     df = get_df()
     total = len(df)
     red = int((df["concern_color"] == "#E24B4A").sum())
@@ -119,6 +122,25 @@ def get_geojson(
     min_score: float | None = Query(None),
     max_score: float | None = Query(None),
 ) -> dict[str, Any]:
+    if uses_database():
+        eng = get_engine()
+        features = list(
+            tq.iter_geojson_features_sql(
+                eng,
+                color=color,
+                state=state,
+                owner=owner,
+                min_score=min_score,
+                max_score=max_score,
+                property_keys=TOWER_PROPERTY_KEYS,
+            )
+        )
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+            "meta": {"count": len(features)},
+        }
+
     df = _apply_tower_filters(
         get_df().copy(),
         color=color,
@@ -149,6 +171,8 @@ def get_geojson(
 
 @router.get("/filters/options")
 def get_filter_options() -> dict[str, Any]:
+    if uses_database():
+        return tq.fetch_filter_options_sql(get_engine())
     df = get_df()
     states: list[str] = []
     if "worst_storm_state" in df.columns:
@@ -173,7 +197,7 @@ def get_filter_options() -> dict[str, Any]:
     }
 
 
-@router.get("/export/csv")
+@router.get("/export/csv", response_model=None)
 def export_towers_csv(
     color: str | None = Query(None),
     state: str | None = Query(None),
@@ -181,7 +205,22 @@ def export_towers_csv(
     min_score: float | None = Query(None),
     max_score: float | None = Query(None),
 ) -> Response:
-    """Export all tower columns for rows matching the same filters as /geojson."""
+    if uses_database():
+        return StreamingResponse(
+            tq.stream_csv_sql(
+                get_engine(),
+                color=color,
+                state=state,
+                owner=owner,
+                min_score=min_score,
+                max_score=max_score,
+            ),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="towers_export.csv"',
+            },
+        )
+
     df = _apply_tower_filters(
         get_df().copy(),
         color=color,
@@ -202,6 +241,20 @@ def export_towers_csv(
 
 @router.get("/geojson/doe-match")
 def get_geojson_doe_match() -> dict[str, Any]:
+    if uses_database():
+        eng = get_engine()
+        total, matched, unmatched = tq.fetch_doe_match_meta_sql(eng)
+        features = list(tq.iter_doe_match_features_sql(eng))
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+            "meta": {
+                "total": total,
+                "matched": matched,
+                "unmatched": unmatched,
+            },
+        }
+
     df = get_df()
     ec = pd.to_numeric(df["doe_event_count"], errors="coerce").fillna(0)
     matched = int((ec > 0).sum())
@@ -251,6 +304,12 @@ def get_geojson_doe_match() -> dict[str, Any]:
 
 @router.get("/{tower_id:path}")
 def get_tower(tower_id: str) -> dict[str, Any]:
+    if uses_database():
+        row = tq.fetch_tower_by_id_sql(get_engine(), tower_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Tower not found")
+        return row
+
     df = get_df()
     match = df[df["id"].astype(str) == tower_id]
     if match.empty:
