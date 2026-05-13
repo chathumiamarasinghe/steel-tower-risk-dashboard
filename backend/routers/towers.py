@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import math
+import os
+import urllib.error
+import urllib.request
 from typing import Any
+from urllib.parse import urlencode, unquote
 
 import numpy as np
 import pandas as pd
@@ -356,8 +360,103 @@ def get_geojson_doe_match(
     }
 
 
+@router.get("/image")
+def get_tower_satellite_image_query(
+    tower_id: str = Query(..., description="Tower id (e.g. node/33349175). Prefer this over path form."),
+    zoom: int = Query(18, ge=14, le=20),
+) -> Response:
+    return _tower_satellite_image_response(tower_id, zoom)
+
+
+@router.get("/image/{tower_id:path}")
+def get_tower_satellite_image_path(
+    tower_id: str,
+    zoom: int = Query(18, ge=14, le=20),
+) -> Response:
+    return _tower_satellite_image_response(tower_id, zoom)
+
+
+def _safe_coord_float(val: Any) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s == "—":
+            return None
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x):
+        return None
+    return x
+
+
+def _tower_satellite_image_response(raw_tower_id: str, zoom: int) -> Response:
+    """
+    Fetch the Static Maps image on the server and return bytes to the client.
+
+    Redirecting the browser straight to Google often breaks <img> loading (Referer
+    restrictions on the API key, redirect handling, or JSON/HTML error bodies).
+    Same-origin image bytes avoid those issues.
+    """
+    api_key = os.getenv("GOOGLE_MAPS_KEY")
+    if not api_key or not str(api_key).strip():
+        raise HTTPException(status_code=500, detail="GOOGLE_MAPS_KEY not configured")
+
+    tower_id = unquote((raw_tower_id or "").strip())
+
+    try:
+        tower_props = get_tower(tower_id)
+    except HTTPException:
+        raise
+    lat_val = tower_props.get("latitude")
+    lon_val = tower_props.get("longitude")
+    lat = _safe_coord_float(lat_val)
+    lon = _safe_coord_float(lon_val)
+
+    if lat is None or lon is None:
+        raise HTTPException(status_code=404, detail="Tower not found")
+
+    params = {
+        "center": f"{lat},{lon}",
+        "zoom": str(zoom),
+        "size": "560x320",
+        "maptype": "satellite",
+        "markers": f"color:red|{lat},{lon}",
+        "key": api_key.strip(),
+    }
+    url = "https://maps.googleapis.com/maps/api/staticmap?" + urlencode(params)
+
+    headers: dict[str, str] = {"User-Agent": "steel-tower-risk-dashboard/1.0"}
+    referer = os.getenv("GOOGLE_STATIC_MAPS_REFERER", "http://localhost:5173/").strip()
+    if referer:
+        headers["Referer"] = referer
+
+    try:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read()
+            media_type = resp.headers.get("Content-Type", "image/png")
+    except urllib.error.HTTPError as e:
+        snippet = e.read().decode("utf-8", errors="replace")[:400]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Static Maps returned {e.code}. {snippet}",
+        ) from e
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Google Static Maps: {e.reason}") from e
+
+    return Response(
+        content=body,
+        media_type=media_type.split(";")[0].strip() or "image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @router.get("/{tower_id:path}")
 def get_tower(tower_id: str) -> dict[str, Any]:
+    tower_id = unquote((tower_id or "").strip())
     if uses_database():
         row = tq.fetch_tower_by_id_sql(get_engine(), tower_id)
         if row is None:
@@ -365,8 +464,17 @@ def get_tower(tower_id: str) -> dict[str, Any]:
         return row
 
     df = get_df()
-    match = df[df["id"].astype(str) == tower_id]
-    if match.empty:
-        raise HTTPException(status_code=404, detail="Tower not found")
-    row = match.iloc[0]
-    return _row_to_props(row)
+    tid_clean = (tower_id or "").strip()
+    ids = df["id"].astype(str).str.strip()
+    for tid in tq.tower_id_lookup_candidates(tid_clean):
+        match = df[ids == tid]
+        if not match.empty:
+            return _row_to_props(match.iloc[0])
+    if "/" in tid_clean:
+        suf = tid_clean.split("/", 1)[1].strip()
+        if suf:
+            tail = ids.str.split("/").str[-1]
+            loose = df[(ids == suf) | (tail == suf)]
+            if not loose.empty:
+                return _row_to_props(loose.iloc[0])
+    raise HTTPException(status_code=404, detail="Tower not found")

@@ -1,3 +1,7 @@
+import { useEffect, useState } from "react";
+
+import { getTowerImageUrl } from "../api/towers.js";
+
 function fmt(v) {
   if (v === undefined || v === null || v === "") return "—";
   if (typeof v === "number" && !Number.isFinite(v)) return "—";
@@ -66,6 +70,217 @@ function Section({ title, color, children }) {
         {title}
       </div>
       <div>{children}</div>
+    </div>
+  );
+}
+
+const ZOOM_TO_RESOLUTION_M = {
+  20: "0.15",
+  19: "0.30",
+  18: "0.60",
+  17: "1.19",
+  16: "2.39",
+  15: "4.78",
+  14: "9.55",
+};
+
+function TowerImagePanel({ tower }) {
+  const p = tower.properties || {};
+  const towerId = p.id;
+  const [zoom, setZoom] = useState(18);
+  const [imageError, setImageError] = useState(false);
+  const [imageLoading, setImageLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    setZoom(18);
+    setReloadKey(0);
+  }, [towerId]);
+
+  useEffect(() => {
+    const missingId =
+      towerId === undefined || towerId === null || String(towerId).trim() === "";
+    if (missingId) {
+      setImageLoading(false);
+      setImageError(true);
+      return;
+    }
+    setImageLoading(true);
+    setImageError(false);
+  }, [towerId, zoom]);
+
+  const resolutionLabel = ZOOM_TO_RESOLUTION_M[zoom] ?? "—";
+  const imageSrc =
+    towerId !== undefined && towerId !== null && String(towerId) !== ""
+      ? getTowerImageUrl(towerId, zoom)
+      : "";
+
+  const zoomButtons = [
+    { label: "Area (z16)", z: 16 },
+    { label: "Street (z17)", z: 17 },
+    { label: "Tower (z18)", z: 18 },
+    { label: "Detail (z20)", z: 20 },
+  ];
+
+  const btnBase = {
+    flex: 1,
+    minWidth: 0,
+    padding: "8px 6px",
+    fontSize: 11,
+    fontWeight: 600,
+    borderRadius: 6,
+    cursor: "pointer",
+    fontFamily: "inherit",
+  };
+
+  return (
+    <div style={{ marginTop: 22, marginBottom: 18 }}>
+      <div
+        style={{
+          background: "#185FA5",
+          color: "#fff",
+          padding: "10px 12px",
+          borderRadius: "8px 8px 0 0",
+          fontSize: 13,
+          fontWeight: 700,
+        }}
+      >
+        Aerial view — satellite imagery
+      </div>
+      <div
+        style={{
+          border: "1px solid #eee",
+          borderTop: "none",
+          borderRadius: "0 0 8px 8px",
+          padding: 12,
+          background: "#fff",
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            aspectRatio: "560 / 320",
+            borderRadius: 8,
+            border: "1px solid #eee",
+            overflow: "hidden",
+            background: "#f1f5f9",
+          }}
+        >
+          {imageError ? (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 12,
+                padding: 16,
+                background: "#e2e8f0",
+                color: "#475569",
+                fontSize: 13,
+                textAlign: "center",
+              }}
+            >
+              Satellite image unavailable for this location.
+              <button
+                type="button"
+                onClick={() => {
+                  setImageError(false);
+                  setImageLoading(true);
+                  setReloadKey((k) => k + 1);
+                }}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 6,
+                  border: "1px solid #185FA5",
+                  background: "#fff",
+                  color: "#185FA5",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
+            <>
+              {imageSrc ? (
+                <img
+                  key={`${towerId}-${zoom}-${reloadKey}`}
+                  src={imageSrc}
+                  alt="Satellite view of tower location"
+                  onLoad={() => {
+                    setImageLoading(false);
+                    setImageError(false);
+                  }}
+                  onError={() => {
+                    setImageLoading(false);
+                    setImageError(true);
+                  }}
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    display: "block",
+                  }}
+                />
+              ) : null}
+              {imageLoading && !imageError && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "#e2e8f0",
+                    color: "#64748b",
+                    fontSize: 13,
+                  }}
+                >
+                  Loading satellite view...
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div style={{ marginTop: 10, fontSize: 13, color: "#334155" }}>
+          Approx resolution: {resolutionLabel} m/pixel
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+          {zoomButtons.map(({ label, z }) => {
+            const active = zoom === z;
+            return (
+              <button
+                key={z}
+                type="button"
+                onClick={() => setZoom(z)}
+                style={{
+                  ...btnBase,
+                  background: active ? "#185FA5" : "#fff",
+                  color: active ? "#fff" : "#185FA5",
+                  border: active ? "1px solid #185FA5" : "1px solid #185FA5",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        <p style={{ margin: "12px 0 0", fontSize: 11, color: "#64748b", lineHeight: 1.45 }}>
+          Satellite imagery via Google Maps. Red marker shows tower coordinates. Images are not
+          real-time — they reflect the most recent available satellite pass for this location.
+        </p>
+      </div>
     </div>
   );
 }
@@ -185,6 +400,8 @@ export default function Sidebar({ tower, onClose }) {
           <Row label="Outage type" value={fmt(p.doe_dominant_type)} />
           <Row label="NERC region" value={fmt(p.doe_nerc_region)} />
         </Section>
+
+        <TowerImagePanel tower={tower} />
       </div>
     </aside>
   );

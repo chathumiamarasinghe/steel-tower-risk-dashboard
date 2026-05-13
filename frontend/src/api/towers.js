@@ -136,3 +136,11 @@ export async function downloadTowersCsv(filters) {
   a.remove();
   URL.revokeObjectURL(href);
 }
+
+export function getTowerImageUrl(towerId, zoom = 18) {
+  const params = new URLSearchParams({
+    tower_id: String(towerId),
+    zoom: String(zoom),
+  });
+  return `${BASE}/towers/image?${params.toString()}`;
+}

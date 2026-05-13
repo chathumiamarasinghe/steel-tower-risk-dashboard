@@ -40,6 +40,30 @@ def _sql_row_to_props(row: dict[str, Any], keys: list[str]) -> dict[str, Any]:
     return d
 
 
+def tower_id_lookup_candidates(tower_id: str) -> list[str]:
+    """
+    OSM-style ids are often stored as 'node/12345'. URLs may pass only the numeric
+    part, or the DB may store only one form — try sensible alternates.
+    """
+    t = (tower_id or "").strip()
+    if not t:
+        return []
+    candidates = [t]
+    if "/" in t:
+        suffix = t.split("/", 1)[1].strip()
+        if suffix:
+            candidates.append(suffix)
+    elif t.isdigit():
+        candidates.append(f"node/{t}")
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
 # Columns selected for API properties (tower_id exposed as id)
 _GEOJSON_SELECT = """
 SELECT
@@ -415,11 +439,36 @@ def _doe_num(val: Any) -> float | int:
 
 
 def fetch_tower_by_id_sql(engine: Engine, tower_id: str) -> dict[str, Any] | None:
-    sql = text(
-        f"{_GEOJSON_SELECT.strip()} WHERE tower_id = :tid LIMIT 1"
-    )
+    """Resolve tower_id against OSM-style ids and plain numeric ids."""
+    raw = (tower_id or "").strip()
+    if not raw:
+        return None
+
+    cands = tower_id_lookup_candidates(raw)
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, c in enumerate(cands):
+        key = f"c{i}"
+        clauses.append(f"TRIM(tower_id::text) = TRIM(:{key})")
+        params[key] = c
+
+    # Match backend-only numeric ids when the client sends "node/<digits>"
+    if "/" in raw:
+        suf = raw.split("/", 1)[1].strip()
+        if suf:
+            clauses.append(
+                "("
+                "(POSITION('/' IN TRIM(tower_id::text)) = 0 AND TRIM(tower_id::text) = :id_suffix)"
+                " OR "
+                "(POSITION('/' IN TRIM(tower_id::text)) > 0 AND split_part(TRIM(tower_id::text), '/', 2) = :id_suffix)"
+                ")"
+            )
+            params["id_suffix"] = suf
+
+    where_sql = " OR ".join(f"({c})" for c in clauses)
+    sql = text(f"{_GEOJSON_SELECT.strip()} WHERE {where_sql} LIMIT 1")
     with engine.connect() as conn:
-        row = conn.execute(sql, {"tid": tower_id}).mappings().first()
+        row = conn.execute(sql, params).mappings().first()
     if not row:
         return None
     return _sql_row_to_props(dict(row), TOWER_PROPERTY_KEYS)
